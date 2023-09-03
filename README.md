@@ -1,6 +1,14 @@
 # BERT-PIN_public
 
-This is the source code of BERT-PIN.
+This is the source code of BERT-PIN, a method to restore missing data segments in load profiles.The model uses BERT-based model to learn the load pattern and achive a high restoration accuracy. The model is desined as follow:
+
+![image](https://github.com/hughwln/BERT-PIN_public/assets/20769362/0aa460c0-d181-4a49-9529-d080272be492)
+
+Examples of load profile inpainting:
+
+![image](https://github.com/hughwln/BERT-PIN_public/assets/20769362/98eddf47-81f4-4e86-8a0b-96f87848d1a3)
+
+For more details, please refer to our paper.
 
 ### Citation
 If you use the code, Please cite this paper.
