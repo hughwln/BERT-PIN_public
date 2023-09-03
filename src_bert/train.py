@@ -537,16 +537,16 @@ def test():
 
         if config.USE_CENTRAL_MASK:
             sae.load_state_dict(
-                torch.load('../checkpoint/0419_feeder2000_200_sae_NewRiver_all_step96/SAE_epoch10.pth'))
+                torch.load('../checkpoint/0419_feeder2000_200_sae_NewRiver_all_step96/SAE.pth'))
             lstm.load_state_dict(
-                torch.load('../checkpoint/0419_feeder2000_200_lstm_NewRiver_all_step96/LSTM_epoch10.pth'))
-            gin.load_state_dict(torch.load('../checkpoint/0614_GIN_central_NewRiver_all_step96/GIN_epoch10.h5'))
+                torch.load('../checkpoint/0419_feeder2000_200_lstm_NewRiver_all_step96/LSTM.pth'))
+            gin.load_state_dict(torch.load('../checkpoint/0614_GIN_central_NewRiver_all_step96/GIN.h5'))
         else:
             sae.load_state_dict(
-                torch.load('../checkpoint/0615_SAE_peak_NewRiver_all_step96/SAE_epoch10.pth'))
+                torch.load('../checkpoint/0615_SAE_peak_NewRiver_all_step96/SAE.pth'))
             lstm.load_state_dict(
-                torch.load('../checkpoint/0615_LSTM_peak_NewRiver_all_step96/LSTM_epoch10.pth'))
-            gin.load_state_dict(torch.load('../checkpoint/0614_GIN_peak_NewRiver_all_step96/GIN_epoch10.h5'))
+                torch.load('../checkpoint/0615_LSTM_peak_NewRiver_all_step96/LSTM.pth'))
+            gin.load_state_dict(torch.load('../checkpoint/0614_GIN_peak_NewRiver_all_step96/GIN.h5'))
 
         sae_mpe_buff = []
         sae_rmse_buff = []
