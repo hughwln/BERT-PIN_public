@@ -13,7 +13,8 @@ For more details, please refer to our paper.
 ### Citation
 If you use the code, Please cite this paper.
 
-Yi Hu, Kai Ye, and Ning Lu, "BERT-based Profile Inpainting for Restoring Multiple Missing Data Segments: A Classification method", 2023
+Yi Hu, Kai Ye, Hyeonjin Kim, and Ning Lu, “BERT-PIN: A BERT-based Framework for Recovering Missing Data Segments in Time-series Load Profiles”, available at http://arxiv.org/abs/2310.17742
+
 
 ### Note: 
 The training data is not included in this repository, due to privacy issue. You can try to run the code with your own data. 
