@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import torch
 import kmeans_pytorch
 from sys import platform
+import config
 
 if platform == "linux" or platform == "linux2":
     import pickle5 as pickle
@@ -43,8 +44,11 @@ class newRiver():
         d = pd.read_csv(t_file)
         d.index = pd.to_datetime(d["Date"])
         d = d.loc['2017-12-27':'2020-12-27']
+        # d = d.loc['2018-6-1':'2018-8-31']
 
         t = d['Temp'].astype(np.float32)
+        # plt.plot(t)
+        # plt.show()
 
         # df = pd.DataFrame(index=t.index)
 
@@ -64,6 +68,7 @@ class newRiver():
                 with open(fullname, 'rb') as f:
                     data = pickle.load(f)
                     data = data.loc['2017-12-27':'2020-12-27']
+                    # data = data.loc['2018-6-1':'2018-8-31']
                     missing = data['usage'].isna()
                     n_missing = missing.sum()
                     if n_missing/len(missing) > 0.5:
@@ -81,22 +86,28 @@ class newRiver():
         print("aggregated ", n, " users.")
         df = df.fillna(0)
 
-
-
-
         data = []
         for i in range(k):
             sample = df.sample(n=nuser, axis='columns')
             sample = sample.sum(axis=1)
             sample = pd.concat([sample, t], axis=1)
+
+            # sample = pd.concat([sample.loc['2018-6-1':'2018-7-6'],
+            #                     sample.loc['2018-7-8':'2018-8-21'],
+            #                     sample.loc['2018-8-26':'2018-8-31']], axis=0)
+
+
+            # trainDataFile = '../data/raw_data/NewRiver/summer_user_' + str(i) + '.csv'
+            # sample.to_csv(trainDataFile)
+
             data.append(sample)
 
         dataset = pd.concat(data, axis=0)
-
-        trainDataFile = '../data/raw_data/NewRiver/NonCVR_LT_2000_20.csv'
+        # trainDataFile = '../data/raw_data/NewRiver/summer_user_0-19.csv'
+        trainDataFile = '../data/raw_data/NewRiver/FeederLevel_LT_' + str(nuser) + '_' + str(k) + '.csv'
         dataset.to_csv(trainDataFile)
 
 
 if __name__ == '__main__':
     dataloader = newRiver()
-    dataloader.read_data_transformer(nuser=2000, k=20)
+    dataloader.read_data_transformer(nuser=config.nuser, k=config.nsample)

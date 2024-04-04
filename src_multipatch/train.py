@@ -11,7 +11,6 @@ import torch.nn as nn
 import config
 import numpy as np
 import model
-import diffusion
 from config import *
 
 from dataset import testloader, trainloader, devloader, cvrloader
@@ -1026,175 +1025,7 @@ def test():
     else:
         print(np.mean(bert_mpe_buff), np.mean(bert_rmse_buff), np.mean(bert_pk_err_buff), np.mean(bert_vl_err_buff), np.mean(bert_egy_err_buff), np.mean(bert_fce_buff))
 
-def test_cvr():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    K = 202
-    heads = 2
-    transformer = model.Transformer(src_vocab_size=K + heads, embed_size=K + heads, heads=heads, num_layers=2,
-                                    forward_expansion=heads, max_length=DIM_INPUT, device=device).to(device)
-    transformer.load_state_dict(torch.load('../checkpoint/0502_cvr_test_NewRiver_all_step96/encoder_100.pth'))
 
-    diff = diffusion.Denoise().to(device)
-    diff.load_state_dict(torch.load('../checkpoint/0510_diffusion_NewRiver_all_step96/diffusion_100.pth'))
-
-    bert_mpe_buff = []
-    bert_rmse_buff = []
-    bert_pk_err_buff = []
-    bert_vl_err_buff = []
-    bert_egy_err_buff = []
-    bert_fce_buff = []
-
-    diff_mpe_buff = []
-    diff_rmse_buff = []
-    diff_pk_err_buff = []
-    diff_vl_err_buff = []
-    diff_egy_err_buff = []
-    diff_fce_buff = []
-
-    for i, data in enumerate(testloader):
-        if i > 10:
-            break
-        # if i % 30 != 0:
-        #     continue
-        model_input, temperature, mask, gt = data
-        model_input = model_input.reshape((model_input.shape[0], model_input.shape[2])).to(device)
-        mask = mask.reshape((mask.shape[0], mask.shape[2])).to(device)
-        gt = gt.reshape((gt.shape[0], gt.shape[2])).to(device)
-        temperature = temperature.reshape((temperature.shape[0], temperature.shape[2])).to(device)
-        bs = gt.size(0)
-        mask_np = mask.cpu().detach().numpy()
-
-        # BERT
-        bert_input = model_input
-        bert_input = torch.round(bert_input * K).type(torch.int)
-        temperature = torch.round(temperature * K).type(torch.int)
-        bert_output = transformer(bert_input, temperature, mask)
-        bert_output = bert_output.argmax(dim=-1)
-        bert_output = bert_output / K
-
-        # Diffusion
-        diff_input = bert_output
-        diff_output = diff(diff_input)
-        diff_est = diff_input - diff_output
-
-        pre_np_bert = bert_output.cpu().detach().numpy()
-        input_np = model_input.cpu().detach().numpy()
-        gt_np = gt.cpu().detach().numpy()
-        diff_est_np = diff_est.cpu().detach().numpy()
-
-        fig = plt.figure(1, figsize=(10, 20))
-        plt.clf()
-        gs = fig.add_gridspec(5, 1)
-        for j in range(5):
-            buff = np.concatenate((pre_np_bert[j, :], gt_np[j, :], diff_est_np[j, :]))
-
-            patch_bgn = np.where(mask_np[j, :] == 1.0)[0][0] - 1
-            patch_end = np.where(mask_np[j, :] == 1.0)[0][-1] + 1
-            x = np.arange(patch_bgn, patch_end + 1)
-            y_min = np.amin(buff)
-            y_max = np.amax(buff)
-
-            ax = fig.add_subplot(gs[j, 0])
-            # draw input data
-            ax.plot(np.arange(0, patch_bgn + 1), input_np[j, 0:patch_bgn + 1], 'k', linewidth=1)
-            ax.plot(np.arange(patch_end, np.size(input_np, axis=1)), input_np[j, patch_end:], 'k', linewidth=1)
-
-            # draw bert output data
-            ax.plot(x, pre_np_bert[j, patch_bgn:patch_end + 1], 'r', linewidth=1)
-
-            # draw diff output data
-            ax.plot(x, diff_est_np[j, patch_bgn:patch_end + 1], 'b', linewidth=1)
-
-            # draw gt
-            ax.plot(x, gt_np[j, patch_bgn:patch_end + 1], 'g', linewidth=1)
-            plt.ylim(y_min, y_max)
-            plt.xticks([])
-            plt.yticks([])
-            rect = plt.Rectangle((patch_bgn, y_min), patch_end - patch_bgn + 1, y_max - y_min,
-                                 facecolor="k", alpha=0.1)
-            ax.add_patch(rect)
-
-        plt.subplots_adjust(wspace=0, hspace=0)
-        plt.pause(0.001)  # pause a bit so that plots are updated
-
-        fn = '../plot/' + TAG + '/samples_pre' + str(i) + '.svg'
-        fig.savefig(fn)
-
-        # calculate errs
-        for idx in range(bs):
-            patch_bgn = np.where(mask_np[idx, :] == 1.0)[0][0]
-            patch_end = np.where(mask_np[idx, :] == 1.0)[0][-1] + 1
-            rmse_bert = mean_squared_error(pre_np_bert[idx, patch_bgn:patch_end], gt_np[idx, patch_bgn:patch_end]) ** 0.5
-            rmse_diff = mean_squared_error(diff_est_np[idx, patch_bgn:patch_end], gt_np[idx, patch_bgn:patch_end]) ** 0.5
-
-            # percentage error: (gt - pre) / gt
-            pe_bert = abs(gt_np[idx, patch_bgn:patch_end] - pre_np_bert[idx, patch_bgn:patch_end]) / gt_np[idx, patch_bgn:patch_end]
-            mpe_bert = np.mean(pe_bert)
-
-            pe_diff = abs(gt_np[idx, patch_bgn:patch_end] - diff_est_np[idx, patch_bgn:patch_end]) / gt_np[idx, patch_bgn:patch_end]
-            mpe_diff = np.mean(pe_diff)
-
-            # energy error
-            egy_err_bert = abs(np.sum(pre_np_bert[idx, patch_bgn:patch_end]) - np.sum(gt_np[idx, patch_bgn:patch_end])) / np.sum(
-                gt_np[idx, patch_bgn:patch_end])
-            egy_err_diff = abs(
-                np.sum(diff_est_np[idx, patch_bgn:patch_end]) - np.sum(gt_np[idx, patch_bgn:patch_end])) / np.sum(
-                gt_np[idx, patch_bgn:patch_end])
-
-            # peak error, valley error, peak-valley error
-            pk_err_bert, vl_err_bert, pkvy_err_bert = evaluation.peak_valley_err(pre_np_bert[idx, patch_bgn:patch_end], gt_np[idx, patch_bgn:patch_end])
-            pk_err_diff, vl_err_diff, pkvy_err_diff = evaluation.peak_valley_err(diff_est_np[idx, patch_bgn:patch_end],
-                                                                                 gt_np[idx, patch_bgn:patch_end])
-
-            # frequency components error
-            f_pre_bert = abs(fft(pre_np_bert[idx, patch_bgn:patch_end]))
-            f_pre_diff = abs(fft(diff_est_np[idx, patch_bgn:patch_end]))
-            f_gt = abs(fft(gt_np[idx, patch_bgn:patch_end]))
-            fft_err_bert = np.sum(abs(f_gt - f_pre_bert)) / (patch_end - patch_bgn + 1)
-            fft_err_diff = np.sum(abs(f_gt - f_pre_diff)) / (patch_end - patch_bgn + 1)
-
-            bert_mpe_buff.append(mpe_bert)
-            bert_rmse_buff.append(rmse_bert)
-            bert_pk_err_buff.append(pk_err_bert)
-            bert_vl_err_buff.append(vl_err_bert)
-            bert_egy_err_buff.append(egy_err_bert)
-            bert_fce_buff.append(fft_err_bert)
-
-            diff_mpe_buff.append(mpe_diff)
-            diff_rmse_buff.append(rmse_diff)
-            diff_pk_err_buff.append(pk_err_diff)
-            diff_vl_err_buff.append(vl_err_diff)
-            diff_egy_err_buff.append(egy_err_diff)
-            diff_fce_buff.append(fft_err_diff)
-
-
-    figure = plt.figure(2)
-    violin_parts = plt.violinplot([bert_mpe_buff, diff_mpe_buff,
-                                   bert_rmse_buff, diff_rmse_buff,
-                                   bert_pk_err_buff, diff_pk_err_buff,
-                                   bert_vl_err_buff, diff_vl_err_buff,
-                                   bert_egy_err_buff, diff_egy_err_buff,
-                                   bert_fce_buff, diff_fce_buff], showmedians=True, showextrema=False)
-    for n in range(len(violin_parts['bodies'])):
-        pc = violin_parts['bodies'][n]
-        if n % 2 == 0:
-            pc.set_facecolor('red')
-            pc.set_edgecolor('red')
-        elif n % 2 == 1:
-            pc.set_facecolor('blue')
-            pc.set_edgecolor('blue')
-
-    plt.xticks(range(0, 12), labels=['mpe', ' ',
-                'rmse', ' ',
-                'pk_err', ' ',
-                'vl_err', ' ',
-                'egy_err', ' ',
-                'fce_err', ' '])
-    plt.show()
-    fn = '../plot/' + TAG + '/violinplot_cvr.svg'
-    figure.savefig(fn)
-    print(np.mean(bert_mpe_buff), np.mean(bert_rmse_buff), np.mean(bert_pk_err_buff), np.mean(bert_vl_err_buff),
-                                   np.mean(bert_egy_err_buff), np.mean(bert_fce_buff))
 
 
 if __name__ == "__main__":
@@ -1204,14 +1035,9 @@ if __name__ == "__main__":
     # train_gin()
     test()
     # test_7days_week()
-    # test_cvr()
 
-    # todo
-    # peak mask
-    # train LSTM
-    # train SAE
-    # train PIN
-    # draw results of BERT LSTM SAE PIN
+
+
 
 
 

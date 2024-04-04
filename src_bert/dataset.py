@@ -431,68 +431,52 @@ if config.GEN_DATASET:
         # real_loads = real_loads.sum(axis=1)
         # real_T = raw_data.iloc[:, -1].to_numpy()
 
-        raw_data = pd.read_csv('../data/raw_data/NewRiver/FeederLevel_LT_2000_200.csv', index_col=0)
-        # raw_data = pd.read_csv('../data/raw_data/NewRiver/NonCVR_LT_2000_20.csv', index_col=0)
+        raw_data = pd.read_csv('../data/FeederLevel_LT_' + str(config.nuser) + '_' + str(config.nsample) + '.csv', index_col=0)
 
         real_loads = raw_data.iloc[:, 0].to_numpy()
         real_T = raw_data.iloc[:, -1].to_numpy()
         pmax = np.amax(real_loads)
+        pmin = np.amin(real_loads)
         tmax = np.amax(real_T)
 
         step = config.STEP
         dim_daily = config.DIM_INPUT
 
-        # ============ cvr data ==========
         cvr_set = []
-        cvr = pd.read_csv('../data/raw_data/NewRiver/CVREvents.csv')
-        cvr.iloc[:, 0] = pd.to_datetime(cvr.iloc[:, 0])
         raw_data.iloc[:, 0] = raw_data.iloc[:, 0] / np.amax(real_loads)
         raw_data.iloc[:, 1] = raw_data.iloc[:, 1] / np.amax(real_T)
         raw_data.index = pd.to_datetime(raw_data.index)
-        for i in range(24):
-            date = cvr.iloc[i, 0].date().isoformat()
-            day = raw_data.loc[date]
-            raw_data = raw_data.drop(day.index)
-            patch_start = cvr.iloc[i, 0].hour * 4 + cvr.iloc[i, 0].minute // 15 - 2
-            power = day.iloc[:, 0].to_numpy()
-            temperature = day.iloc[:, 1].to_numpy()
-            for j in range(len(day.index) // dim_daily):
-                T = temperature[j * dim_daily: (j + 1) * dim_daily]  # daily temperature
-                load_gt = power[j * dim_daily: (j + 1) * dim_daily]
-
-                mask = np.zeros(dim_daily, dtype=bool)
-                mask[patch_start:patch_start + config.DIM_PATCH] = True  # hole-True
-                load_patched = load_gt * ~mask
-                cvr_set.append(
-                    np.concatenate((load_patched, mask, T, load_gt), axis=0, dtype=float).reshape(1, dim_daily * 4))
-        cvr_set = np.concatenate(cvr_set, axis=0)
-        print("Finish CVR data processing.")
-        # ==================================
-
 
         real_loads = raw_data.iloc[:, 0].to_numpy()
         power = real_loads
         temperature = raw_data.iloc[:, -1].to_numpy()
         max_load = np.amax(power)
         max_size = int(real_loads.shape[0] / step)
+        peak_dist = []
+        patch_values = np.array([])
 
         norm_set = np.zeros([max_size, dim_daily * 4])  # input/mask/temperature/gt
         pt_norm = 0  # pointer for normal samples
         for i_st in range(0, real_loads.shape[0] - dim_daily, step):
             T = temperature[i_st: (i_st + dim_daily)]  # daily temperature
             load_gt = power[i_st: (i_st + dim_daily)]
-            if config.USE_CENTRAL_MASK:
+            peak_dist.append(np.amax(load_gt))
+
+            if config.MASK_STRATEGY == "Central":
                 patch_start = dim_daily // 2 - config.DIM_PATCH // 2
-            else:
+            elif config.MASK_STRATEGY == "Peak":
                 peak_index = max(load_gt.argmax(axis=0) - config.DIM_PATCH // 2, 1)
                 patch_start = min(peak_index, dim_daily - config.DIM_PATCH - 1)
-                # patch_start = np.random.randint(1, dim_daily - config.DIM_PATCH - 1)
+            elif config.MASK_STRATEGY == "Random":
+                patch_start = np.random.randint(1, dim_daily - config.DIM_PATCH - 1)
             mask = np.zeros(dim_daily, dtype=bool)
             mask[patch_start:patch_start + config.DIM_PATCH] = True  # hole-True
             load_patched = load_gt * ~mask
             norm_set[pt_norm, :] = np.concatenate((load_patched, mask, T, load_gt), axis=0, dtype=float).reshape(1,
                                                                                                                  dim_daily * 4)
             pt_norm += 1
+
+            # patch_values = np.concatenate((patch_values, load_gt[patch_start:patch_start + config.DIM_PATCH]))
 
         print("Total normal samples:", pt_norm)
         for i in range(pt_norm):
@@ -501,6 +485,20 @@ if config.GEN_DATASET:
                 print('Bad data in Normal set at:', i)
         # split whole dataset into train/dev/test set,
         # do not use np.random.shuffle() to total array, will output 0 valus randomly, seems like a bug in numpy
+
+        # show the distribution of daily peak values.
+        figure = plt.figure(2)
+        violin_parts = plt.violinplot([[element * pmax for element in peak_dist],
+                                       [element * pmax for element in real_loads]],
+                                      showmedians=True, showextrema=False, vert=False)
+        violin_parts['bodies'][0].set_facecolor('blue')
+        violin_parts['bodies'][1].set_facecolor('green')
+        plt.yticks(range(1, 3), labels=['Daily Peak Values', 'Load Values'])
+        plt.xlabel("Power (kw)")
+        # plt.show()
+        fn = '../plot/' + config.TAG + '/peak_violinplot.png'
+        figure.savefig(fn, dpi=300)
+        # =============================================
 
         if config.N_SAMPLE != 'all':
             print('Randomly select ' + str(config.N_SAMPLE) + ' samples...')

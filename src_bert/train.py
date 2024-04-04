@@ -11,7 +11,6 @@ import torch.nn as nn
 import config
 import numpy as np
 import model
-import diffusion
 from config import *
 
 from dataset import testloader, trainloader, devloader, cvrloader
@@ -184,85 +183,6 @@ def train_bert():
     EVALERR_PTH = '../eval/' + config.TAG + '/BERT_eval_err.npy'
     np.save(EVALERR_PTH, err_rec)
 
-def train_benchmark():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = "cpu"
-
-    sae = model.SAE(name='SAE').to(device)
-    lstm = model.LSTM(in_channels=CH_INPUT, name='LSTM').to(device)
-
-    opt_sae = torch.optim.Adam(sae.parameters(), lr=LR, betas=(0.9, 0.99))
-    opt_lstm = torch.optim.Adam(lstm.parameters(), lr=LR, betas=(0.9, 0.99))
-
-    models = [sae, lstm]
-    opts = [opt_sae, opt_lstm]
-
-    mse_loss = torch.nn.MSELoss()
-
-    # ------------------------------------Training------------------------------------
-    start_t = time.strftime("%Y/%m/%d %H:%M:%S")
-    loss_train_rec = [[] for n in range(len(models))]
-    loss_eval_rec = [[] for n in range(len(models))]
-    err_rec = [[] for n in range(len(models))]
-
-    for epoch in range(config.N_EPOCH):
-        train_loss_list = [[] for n in range(len(models))]
-        for i, data in enumerate(trainloader):
-            for j in range(len(models)):
-                models[j].train()
-                model_input, temperature, mask, gt = data
-                bs = gt.size(0)
-                model_input = model_input.reshape((model_input.shape[0], model_input.shape[2])).to(device)
-                mask = mask.reshape((mask.shape[0], mask.shape[2])).to(device)
-                temperature = temperature.reshape((temperature.shape[0], temperature.shape[2])).to(device)
-                gt = gt.reshape((gt.shape[0], gt.shape[2])).to(device)
-
-                opts[j].zero_grad()
-                if models[j].name == 'SAE':
-                    mask_np = mask.cpu().detach().numpy()
-                    for k in range(bs):
-                        load_np = model_input[k, :].cpu().detach().numpy()
-                        patch_bgn = np.where(mask_np[k, :] == 1.0)[0][0]
-                        patch_end = np.where(mask_np[k, :] == 1.0)[0][-1]
-                        m_ = 0.5 * (load_np[patch_bgn - 1] + load_np[patch_end + 1])
-                        model_input_sae = model_input
-                        model_input_sae[k, patch_bgn:patch_end + 1] = \
-                            m_ * torch.ones_like(model_input[k, patch_bgn:patch_end + 1])
-                    pre = models[j](model_input_sae[:, :])
-                    pre = model_input_sae[:, :] + pre * mask
-                else:
-                    pre = models[j](model_input, mask, temperature)
-                    pre = model_input[:, :] + pre * mask
-
-                loss_train = calc_benchmark_loss(pre, gt, mask)
-                train_loss_list[j].append(loss_train.item())
-                loss_train.backward()
-                opts[j].step()
-
-        for j in range(len(models)):
-            loss_mean = np.mean(train_loss_list[j])
-            loss_train_rec[j].append(loss_mean)
-            models[j].save_checkpoint(epoch)
-
-            '[ave_mpe, ave_rmse, ave_pk_err, ave_vl_err, ave_egy_err, ave_fce]'
-            eval_loss, errs = evaluation.eval_set(models[j], 1, mse_loss, device)
-            loss_eval_rec[j].append(eval_loss)
-            err_rec[j].append(errs)
-            t = time.strftime("%Y/%m/%d %H:%M:%S")
-            print("epoch ", epoch, " ====== ", models[j].name, "train loss ", loss_mean, " eval loss ", eval_loss, t)
-            evaluation.plot_samples(models[j], epoch, 1, device)
-            evaluation.plot_loss(loss_train_rec[j], loss_eval_rec[j], epoch, models[j].name)
-            evaluation.plot_err(err_rec[j], epoch, models[j].name)
-        epoch += 1
-
-    for j in range(len(models)):
-        TRAINLOSS_PTH = '../eval/' + config.TAG + '/' + models[j].name + '_train_loss.npy'
-        np.save(TRAINLOSS_PTH, loss_train_rec[j])
-        EVALLOSS_PTH = '../eval/' + config.TAG + '/' + models[j].name + '_eval_loss.npy'
-        np.save(EVALLOSS_PTH, loss_eval_rec[j])
-        EVALERR_PTH = '../eval/' + config.TAG + '/' + models[j].name + '_eval_err.npy'
-        np.save(EVALERR_PTH, err_rec[j])
-
 def train_sae():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # device = "cpu"
@@ -349,7 +269,7 @@ def train_lstm():
     loss_eval_rec = []
     err_rec = []
 
-    for epoch in range(11):
+    for epoch in range(config.N_EPOCH):
         train_loss_list = []
         for i, data in enumerate(trainloader):
             lstm.train()
@@ -510,6 +430,100 @@ def blin_2nd_iter(transformer, bert_input, temperature, mask, k):
 
     return bert_input
 
+def blin_2nd_iter_improved(transformer, bert_input, temperature, mask, k=2, e=0.1):
+    # find the fork position
+    for j in range(bert_input.size(0)):
+        bert_output = transformer(bert_input[j:j+1, :], temperature[j:j+1, :], mask[j:j+1, :])
+        mask_np = mask[j:j+1, :].cpu().detach().numpy()
+        patch_bgn = np.where(mask_np[0, :] == 1.0)[0][0]
+        patch_end = np.where(mask_np[0, :] == 1.0)[0][-1]
+        p_left = patch_bgn
+        p_right = patch_end
+        left_fork = patch_bgn + int(config.DIM_PATCH/2)
+        right_fork = patch_end - int(config.DIM_PATCH/2)
+        while(p_left < left_fork):
+            bgn_top1 = torch.topk(bert_output[0, p_left], k=1)[0][-1]
+            bgn_topk = torch.topk(bert_output[0, p_left], k=2)[0][-1]
+            if bgn_top1 - bgn_topk < e:
+                left_fork = p_left
+                bert_input[j, left_fork] = torch.topk(bert_output[0, p_left], k=2)[1][-1]
+
+                break
+            else:
+                p_left += 1
+
+        while(p_right > right_fork):
+            end_top1 = torch.topk(bert_output[0, p_right], k=1)[0][-1]
+            end_topk = torch.topk(bert_output[0, p_right], k=2)[0][-1]
+            if end_top1 - end_topk < e:
+                right_fork = p_right
+                bert_input[j, right_fork] = torch.topk(bert_output[0, p_right], k=2)[1][-1]
+
+                break
+            else:
+                p_right -= 1
+
+        bert_input[j, patch_bgn: left_fork] = bert_output[0, patch_bgn: left_fork].argmax(dim=-1)
+        bert_input[j, right_fork + 1: patch_end + 1] = bert_output[0, right_fork + 1: patch_end + 1].argmax(dim=-1)
+
+        for i in range(left_fork + 1 - patch_bgn, int(config.DIM_PATCH/2)):
+            shift_left = torch.zeros_like(bert_input[j:j+1, :])
+            shift_left[:, :-i] = bert_input[j:j+1, i:].clone()
+            shift_left[:, -i:] = bert_input[j:j+1, :i].clone()
+            temp_left = torch.zeros_like(temperature[j:j+1, :])
+            temp_left[:, :-i] = temperature[j:j+1, i:].clone()
+            temp_left[:, -i:] = temperature[j:j+1, :i].clone()
+            blin_output_left = transformer(shift_left * ~mask[j:j+1, :], temp_left, mask[j:j+1, :])
+
+            bert_input[j, patch_bgn + i] = torch.topk(blin_output_left[0, patch_bgn], k=k)[1][0]
+            show = bert_input[j, :]
+
+        for i in range(patch_end - right_fork + 1, int(config.DIM_PATCH / 2)):
+            shift_right = torch.zeros_like(bert_input[j:j+1, :])
+            shift_right[:, i:] = bert_input[j:j + 1, :-i].clone()
+            shift_right[:, :i] = bert_input[j:j + 1, -i:].clone()
+            temp_right = torch.zeros_like(temperature[j:j+1, :])
+            temp_right[:, i:] = temperature[j:j + 1, :-i].clone()
+            temp_right[:, :i] = temperature[j:j + 1, -i:].clone()
+            blin_output_right = transformer(shift_right * ~mask[j:j+1, :], temp_right, mask[j:j+1, :])
+
+            bert_input[j, patch_end - i] = torch.topk(blin_output_right[0, patch_end], k=k)[1][0]
+            show = bert_input[j, :]
+
+
+    return bert_input
+
+def blin_combine(blin_output, blin2i_output, gt):
+    for i in range(gt.size(0)):
+        for j in range(gt.size(1)):
+            dis1 = abs(blin_output[i, j] - gt[i, j])
+            dis2 = abs(blin2i_output[i, j] - gt[i, j])
+            if dis1 > dis2:
+                blin_output[i, j] = blin2i_output[i, j]
+
+    return blin_output
+
+def reconciliation(bert_output, blin_output, blin2i_output, mask, e=0.1):
+    for i in range(int(config.DIM_PATCH/2)):
+        mask_np = mask.cpu().detach().numpy()
+        for j in range(bert_output.size(0)):
+            patch_bgn = np.where(mask_np[j, :] == 1.0)[0][0]
+            patch_end = np.where(mask_np[j, :] == 1.0)[0][-1]
+            bgn_top1 = torch.topk(bert_output[j, patch_bgn], k=1)[0][-1]
+            bgn_topk = torch.topk(bert_output[j, patch_bgn], k=2)[0][-1]
+            end_top1 = torch.topk(bert_output[j, patch_end], k=1)[0][-1]
+            end_topk = torch.topk(bert_output[j, patch_end], k=2)[0][-1]
+            if bgn_top1 - bgn_topk < e:
+                blin_output[j, patch_bgn] = blin2i_output[j, patch_bgn]
+
+            if end_top1 - end_topk < e:
+                blin_output[j, patch_end] = blin2i_output[j, patch_end]
+
+            mask[j, patch_bgn] = False
+            mask[j, patch_end] = False
+
+    return blin_output
+
 def test():
     bm = False
     second = True
@@ -522,6 +536,7 @@ def test():
         transformer.load_state_dict(torch.load('../checkpoint/0419_feeder2000_200_global_local_mse_mid_NewRiver_all_step96/encoder_100.pth'))
     else:
         transformer.load_state_dict(torch.load('../checkpoint/0417_feeder2000_200_global_local_peak_mse_NewRiver_all_step96/encoder_100.pth'))
+        # transformer.load_state_dict(torch.load('../checkpoint/' + config.TAG + '/encoder_100.pth'))
 
     bert_mpe_buff = []
     bert_rmse_buff = []
@@ -537,16 +552,16 @@ def test():
 
         if config.USE_CENTRAL_MASK:
             sae.load_state_dict(
-                torch.load('../checkpoint/0419_feeder2000_200_sae_NewRiver_all_step96/SAE.pth'))
+                torch.load('../checkpoint/0419_feeder2000_200_sae_NewRiver_all_step96/SAE_epoch10.pth'))
             lstm.load_state_dict(
-                torch.load('../checkpoint/0419_feeder2000_200_lstm_NewRiver_all_step96/LSTM.pth'))
-            gin.load_state_dict(torch.load('../checkpoint/0614_GIN_central_NewRiver_all_step96/GIN.h5'))
+                torch.load('../checkpoint/0419_feeder2000_200_lstm_NewRiver_all_step96/LSTM_epoch10.pth'))
+            gin.load_state_dict(torch.load('../checkpoint/0614_GIN_central_NewRiver_all_step96/GIN_epoch10.h5'))
         else:
             sae.load_state_dict(
-                torch.load('../checkpoint/0615_SAE_peak_NewRiver_all_step96/SAE.pth'))
+                torch.load('../checkpoint/' + config.TAG + '/SAE.pth'))
             lstm.load_state_dict(
-                torch.load('../checkpoint/0615_LSTM_peak_NewRiver_all_step96/LSTM.pth'))
-            gin.load_state_dict(torch.load('../checkpoint/0614_GIN_peak_NewRiver_all_step96/GIN.h5'))
+                torch.load('../checkpoint/' + config.TAG + '/LSTM.pth'))
+            gin.load_state_dict(torch.load('../checkpoint/' + config.TAG + '/GIN.h5'))
 
         sae_mpe_buff = []
         sae_rmse_buff = []
@@ -589,8 +604,9 @@ def test():
         blin2add_egy_err_buff = []
         blin2add_fce_buff = []
 
-    method1 = 0
-    method2 = 0
+    top2_ite = []
+    top2_reconciliation = []
+    reconciliation_parameters = [0.4, 0.3, 0.2, 0.1, 0.01, 0.0]
     for i, data in enumerate(testloader):
         model_input, temperature, mask, gt = data
         model_input = model_input.reshape((model_input.shape[0], model_input.shape[2])).to(device)
@@ -627,10 +643,21 @@ def test():
             blin2_output = blin2_output[:, :, -1]
             blin2_output = blin2_output / K
             blin2_output = model_input[:, :] + blin2_output * mask
-            blin2i_output = blin_2nd_iter(transformer, bert_input.clone(), temperature.clone(), mask.clone(), k=k)
+            # blin2i_output = blin_2nd_iter(transformer, bert_input.clone(), temperature.clone(), mask.clone(), k=k)
+            blin2i_output = blin_2nd_iter_improved(transformer, bert_input.clone(), temperature.clone(), mask.clone(), k=k, e=0.5)
             blin2i_output = blin2i_output / K
             blin2i_output = model_input[:, :] + blin2i_output * mask
-            blin2_add_output = (blin_output + blin2i_output) / 2.0
+            blin2_add_output = blin_combine(blin_output.clone(), blin2i_output.clone(), gt.clone())
+            # blin2_add_output = reconciliation(bert_output.clone(), blin_output.clone(), blin2i_output.clone(), mask.clone(), e=reconciliation_parameters[0])
+            reconciliation_1 = reconciliation(bert_output.clone(), blin_output.clone(), blin2i_output.clone(), mask.clone(), e=reconciliation_parameters[1])
+            reconciliation_2 = reconciliation(bert_output.clone(), blin_output.clone(), blin2i_output.clone(),
+                                                   mask.clone(), e=reconciliation_parameters[2])
+            reconciliation_3 = reconciliation(bert_output.clone(), blin_output.clone(), blin2i_output.clone(),
+                                                   mask.clone(), e=reconciliation_parameters[3])
+            reconciliation_4 = reconciliation(bert_output.clone(), blin_output.clone(), blin2i_output.clone(),
+                                                   mask.clone(), e=reconciliation_parameters[4])
+            reconciliation_5 = reconciliation(bert_output.clone(), blin_output.clone(), blin2i_output.clone(),
+                                                  mask.clone(), e=reconciliation_parameters[5])
 
         # SAE
         if bm:
@@ -650,6 +677,11 @@ def test():
             pre_np_blin2 = blin2_output.cpu().detach().numpy()
             pre_np_blin2i = blin2i_output.cpu().detach().numpy()
             pre_np_add = blin2_add_output.cpu().detach().numpy()
+            reconciliation_1 = reconciliation_1.cpu().detach().numpy()
+            reconciliation_2 = reconciliation_2.cpu().detach().numpy()
+            reconciliation_3 = reconciliation_3.cpu().detach().numpy()
+            reconciliation_4 = reconciliation_4.cpu().detach().numpy()
+            reconciliation_5 = reconciliation_5.cpu().detach().numpy()
         if bm:
             pre_np_sae = sae_output.cpu().detach().numpy()
             pre_np_lstm = lstm_output.cpu().detach().numpy()
@@ -678,8 +710,6 @@ def test():
             ax.plot(np.arange(0, patch_bgn + 1), input_np[j, 0:patch_bgn + 1], 'k', linewidth=1)
             ax.plot(np.arange(patch_end, np.size(input_np, axis=1)), input_np[j, patch_end:], 'k', linewidth=1)
 
-            # draw output data
-            ax.plot(x, pre_np_bert[j, patch_bgn:patch_end + 1], 'r', linewidth=1, label='BERT-PIN')
             if second:
                 ax.plot(x, pre_np_blin2[j, patch_bgn:patch_end + 1], 'r--', linewidth=1, label='BERT-PIN_2')
                 ax.plot(x, pre_np_blin2i[j, patch_bgn:patch_end + 1], 'r-.', linewidth=1, label='BERT-PIN_2i')
@@ -687,7 +717,8 @@ def test():
                 ax.plot(x, pre_np_sae[j, patch_bgn:patch_end + 1], 'b', linewidth=1, label='SAE')
                 ax.plot(x, pre_np_lstm[j, patch_bgn:patch_end + 1], 'y', linewidth=1, label='LSTM')
                 ax.plot(x, pre_np_gin[j, patch_bgn:patch_end + 1], 'm', linewidth=1, label='Load-PIN')
-
+            # draw output data
+            ax.plot(x, pre_np_bert[j, patch_bgn:patch_end + 1], 'r', linewidth=1, label='BERT-PIN')
             # draw gt
             ax.plot(x, gt_np[j, patch_bgn:patch_end + 1], 'g', linewidth=1, label='GT')
             plt.ylim(y_min, y_max)
@@ -801,14 +832,26 @@ def test():
                 rmse_2i = mean_squared_error(pre_np_blin2i[idx, patch_bgn:patch_end],
                                                gt_np[idx, patch_bgn:patch_end]) ** 0.5
 
+                count_ite = 0
+                count_reconciliation = [0, 0, 0, 0, 0, 0]
                 for index in range(patch_bgn, patch_end):
-                    distance1 = abs(pre_np_bert[idx, index] - gt_np[idx, index])
-                    # distance1 = abs(pre_np_blin2[idx, index] - gt_np[idx, index])
-                    distance2 = abs(pre_np_blin2i[idx, index] - gt_np[idx, index])
-                    if distance1 < distance2:
-                        method1 += 1
-                    else:
-                        method2 += 1
+                    base_distance = abs(pre_np_bert[idx, index] - gt_np[idx, index])
+                    # distance_ite = abs(pre_np_blin2[idx, index] - gt_np[idx, index])
+                    distance_ite = abs(pre_np_blin2i[idx, index] - gt_np[idx, index])
+                    distance_reconciliation = [abs(pre_np_add[idx, index] - gt_np[idx, index]),
+                                               abs(reconciliation_1[idx, index] - gt_np[idx, index]),
+                                               abs(reconciliation_2[idx, index] - gt_np[idx, index]),
+                                               abs(reconciliation_3[idx, index] - gt_np[idx, index]),
+                                               abs(reconciliation_4[idx, index] - gt_np[idx, index]),
+                                               abs(reconciliation_5[idx, index] - gt_np[idx, index])]
+                    if distance_ite < base_distance:
+                        count_ite += 1
+                    for par in range(6):
+                        if distance_reconciliation[par] < base_distance:
+                            count_reconciliation[par] += 1
+
+                top2_ite.append(count_ite / 0.16)
+                top2_reconciliation.append([item / 0.16 for item in count_reconciliation])
 
                 pe_2 = abs(gt_np[idx, patch_bgn:patch_end] - pre_np_blin2[idx, patch_bgn:patch_end]) / gt_np[idx,
                                                                                                        patch_bgn:patch_end]
@@ -867,31 +910,31 @@ def test():
                 blin2add_egy_err_buff.append(egy_err_add)
                 blin2add_fce_buff.append(fft_err_add)
 
-        if i > 10:
+        if i > 20:
             break
 
     figure = plt.figure(2)
     if bm:
-        violin_parts = plt.violinplot([bert_mpe_buff, sae_mpe_buff, lstm_mpe_buff, gin_mpe_buff,
-                                       bert_rmse_buff, sae_rmse_buff, lstm_rmse_buff, gin_rmse_buff,
-                                       bert_pk_err_buff, sae_pk_err_buff, lstm_pk_err_buff, gin_pk_err_buff,
-                                       bert_vl_err_buff, sae_vl_err_buff, lstm_vl_err_buff, gin_vl_err_buff,
-                                       bert_egy_err_buff, sae_egy_err_buff, lstm_egy_err_buff, gin_egy_err_buff,
-                                       bert_fce_buff, sae_fce_buff, lstm_fce_buff, gin_fce_buff], showmedians=True, showextrema=False)
+        violin_parts = plt.violinplot([sae_mpe_buff, lstm_mpe_buff, gin_mpe_buff, bert_mpe_buff,
+                                       sae_rmse_buff, lstm_rmse_buff, gin_rmse_buff, bert_rmse_buff,
+                                       sae_pk_err_buff, lstm_pk_err_buff, gin_pk_err_buff, bert_pk_err_buff,
+                                       sae_vl_err_buff, lstm_vl_err_buff, gin_vl_err_buff, bert_vl_err_buff,
+                                       sae_egy_err_buff, lstm_egy_err_buff, gin_egy_err_buff, bert_egy_err_buff,
+                                       sae_fce_buff, lstm_fce_buff, gin_fce_buff, bert_fce_buff], showmedians=True, showextrema=False)
         for n in range(len(violin_parts['bodies'])):
             pc = violin_parts['bodies'][n]
             if n % 4 == 0:
-                pc.set_facecolor('red')
-                pc.set_edgecolor('red')
-            elif n % 4 == 1:
                 pc.set_facecolor('blue')
                 pc.set_edgecolor('blue')
-            elif n % 4 == 2:
+            elif n % 4 == 1:
                 pc.set_facecolor('yellow')
                 pc.set_edgecolor('yellow')
-            elif n % 4 == 3:
+            elif n % 4 == 2:
                 pc.set_facecolor('magenta')
                 pc.set_edgecolor('magenta')
+            elif n % 4 == 3:
+                pc.set_facecolor('red')
+                pc.set_edgecolor('red')
         plt.xticks(range(1, 25), labels=['', 'mpe', '', '', '',
                     'rmse', '', '', '',
                     'pk_err', '', '', '',
@@ -940,178 +983,28 @@ def test():
               np.mean(blin2add_egy_err_buff), '\n',
               np.mean(blin2add_fce_buff))
 
-        print("method1: ", method1, "method2: ", method2)
-
-def test_cvr():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    K = 202
-    heads = 2
-    transformer = model.Transformer(src_vocab_size=K + heads, embed_size=K + heads, heads=heads, num_layers=2,
-                                    forward_expansion=heads, max_length=DIM_INPUT, device=device).to(device)
-    transformer.load_state_dict(torch.load('../checkpoint/0502_cvr_test_NewRiver_all_step96/encoder_100.pth'))
-
-    diff = diffusion.Denoise().to(device)
-    diff.load_state_dict(torch.load('../checkpoint/0510_diffusion_NewRiver_all_step96/diffusion_100.pth'))
-
-    bert_mpe_buff = []
-    bert_rmse_buff = []
-    bert_pk_err_buff = []
-    bert_vl_err_buff = []
-    bert_egy_err_buff = []
-    bert_fce_buff = []
-
-    diff_mpe_buff = []
-    diff_rmse_buff = []
-    diff_pk_err_buff = []
-    diff_vl_err_buff = []
-    diff_egy_err_buff = []
-    diff_fce_buff = []
-
-    for i, data in enumerate(testloader):
-        if i > 10:
-            break
-        # if i % 30 != 0:
-        #     continue
-        model_input, temperature, mask, gt = data
-        model_input = model_input.reshape((model_input.shape[0], model_input.shape[2])).to(device)
-        mask = mask.reshape((mask.shape[0], mask.shape[2])).to(device)
-        gt = gt.reshape((gt.shape[0], gt.shape[2])).to(device)
-        temperature = temperature.reshape((temperature.shape[0], temperature.shape[2])).to(device)
-        bs = gt.size(0)
-        mask_np = mask.cpu().detach().numpy()
-
-        # BERT
-        bert_input = model_input
-        bert_input = torch.round(bert_input * K).type(torch.int)
-        temperature = torch.round(temperature * K).type(torch.int)
-        bert_output = transformer(bert_input, temperature, mask)
-        bert_output = bert_output.argmax(dim=-1)
-        bert_output = bert_output / K
-
-        # Diffusion
-        diff_input = bert_output
-        diff_output = diff(diff_input)
-        diff_est = diff_input - diff_output
-
-        pre_np_bert = bert_output.cpu().detach().numpy()
-        input_np = model_input.cpu().detach().numpy()
-        gt_np = gt.cpu().detach().numpy()
-        diff_est_np = diff_est.cpu().detach().numpy()
-
-        fig = plt.figure(1, figsize=(10, 20))
-        plt.clf()
-        gs = fig.add_gridspec(5, 1)
-        for j in range(5):
-            buff = np.concatenate((pre_np_bert[j, :], gt_np[j, :], diff_est_np[j, :]))
-
-            patch_bgn = np.where(mask_np[j, :] == 1.0)[0][0] - 1
-            patch_end = np.where(mask_np[j, :] == 1.0)[0][-1] + 1
-            x = np.arange(patch_bgn, patch_end + 1)
-            y_min = np.amin(buff)
-            y_max = np.amax(buff)
-
-            ax = fig.add_subplot(gs[j, 0])
-            # draw input data
-            ax.plot(np.arange(0, patch_bgn + 1), input_np[j, 0:patch_bgn + 1], 'k', linewidth=1)
-            ax.plot(np.arange(patch_end, np.size(input_np, axis=1)), input_np[j, patch_end:], 'k', linewidth=1)
-
-            # draw bert output data
-            ax.plot(x, pre_np_bert[j, patch_bgn:patch_end + 1], 'r', linewidth=1)
-
-            # draw diff output data
-            ax.plot(x, diff_est_np[j, patch_bgn:patch_end + 1], 'b', linewidth=1)
-
-            # draw gt
-            ax.plot(x, gt_np[j, patch_bgn:patch_end + 1], 'g', linewidth=1)
-            plt.ylim(y_min, y_max)
-            plt.xticks([])
-            plt.yticks([])
-            rect = plt.Rectangle((patch_bgn, y_min), patch_end - patch_bgn + 1, y_max - y_min,
-                                 facecolor="k", alpha=0.1)
-            ax.add_patch(rect)
-
-        plt.subplots_adjust(wspace=0, hspace=0)
-        plt.pause(0.001)  # pause a bit so that plots are updated
-
-        fn = '../plot/' + TAG + '/samples_pre' + str(i) + '.svg'
-        fig.savefig(fn)
-
-        # calculate errs
-        for idx in range(bs):
-            patch_bgn = np.where(mask_np[idx, :] == 1.0)[0][0]
-            patch_end = np.where(mask_np[idx, :] == 1.0)[0][-1] + 1
-            rmse_bert = mean_squared_error(pre_np_bert[idx, patch_bgn:patch_end], gt_np[idx, patch_bgn:patch_end]) ** 0.5
-            rmse_diff = mean_squared_error(diff_est_np[idx, patch_bgn:patch_end], gt_np[idx, patch_bgn:patch_end]) ** 0.5
-
-            # percentage error: (gt - pre) / gt
-            pe_bert = abs(gt_np[idx, patch_bgn:patch_end] - pre_np_bert[idx, patch_bgn:patch_end]) / gt_np[idx, patch_bgn:patch_end]
-            mpe_bert = np.mean(pe_bert)
-
-            pe_diff = abs(gt_np[idx, patch_bgn:patch_end] - diff_est_np[idx, patch_bgn:patch_end]) / gt_np[idx, patch_bgn:patch_end]
-            mpe_diff = np.mean(pe_diff)
-
-            # energy error
-            egy_err_bert = abs(np.sum(pre_np_bert[idx, patch_bgn:patch_end]) - np.sum(gt_np[idx, patch_bgn:patch_end])) / np.sum(
-                gt_np[idx, patch_bgn:patch_end])
-            egy_err_diff = abs(
-                np.sum(diff_est_np[idx, patch_bgn:patch_end]) - np.sum(gt_np[idx, patch_bgn:patch_end])) / np.sum(
-                gt_np[idx, patch_bgn:patch_end])
-
-            # peak error, valley error, peak-valley error
-            pk_err_bert, vl_err_bert, pkvy_err_bert = evaluation.peak_valley_err(pre_np_bert[idx, patch_bgn:patch_end], gt_np[idx, patch_bgn:patch_end])
-            pk_err_diff, vl_err_diff, pkvy_err_diff = evaluation.peak_valley_err(diff_est_np[idx, patch_bgn:patch_end],
-                                                                                 gt_np[idx, patch_bgn:patch_end])
-
-            # frequency components error
-            f_pre_bert = abs(fft(pre_np_bert[idx, patch_bgn:patch_end]))
-            f_pre_diff = abs(fft(diff_est_np[idx, patch_bgn:patch_end]))
-            f_gt = abs(fft(gt_np[idx, patch_bgn:patch_end]))
-            fft_err_bert = np.sum(abs(f_gt - f_pre_bert)) / (patch_end - patch_bgn + 1)
-            fft_err_diff = np.sum(abs(f_gt - f_pre_diff)) / (patch_end - patch_bgn + 1)
-
-            bert_mpe_buff.append(mpe_bert)
-            bert_rmse_buff.append(rmse_bert)
-            bert_pk_err_buff.append(pk_err_bert)
-            bert_vl_err_buff.append(vl_err_bert)
-            bert_egy_err_buff.append(egy_err_bert)
-            bert_fce_buff.append(fft_err_bert)
-
-            diff_mpe_buff.append(mpe_diff)
-            diff_rmse_buff.append(rmse_diff)
-            diff_pk_err_buff.append(pk_err_diff)
-            diff_vl_err_buff.append(vl_err_diff)
-            diff_egy_err_buff.append(egy_err_diff)
-            diff_fce_buff.append(fft_err_diff)
-
-
-    figure = plt.figure(2)
-    violin_parts = plt.violinplot([bert_mpe_buff, diff_mpe_buff,
-                                   bert_rmse_buff, diff_rmse_buff,
-                                   bert_pk_err_buff, diff_pk_err_buff,
-                                   bert_vl_err_buff, diff_vl_err_buff,
-                                   bert_egy_err_buff, diff_egy_err_buff,
-                                   bert_fce_buff, diff_fce_buff], showmedians=True, showextrema=False)
-    for n in range(len(violin_parts['bodies'])):
-        pc = violin_parts['bodies'][n]
-        if n % 2 == 0:
-            pc.set_facecolor('red')
-            pc.set_edgecolor('red')
-        elif n % 2 == 1:
-            pc.set_facecolor('blue')
-            pc.set_edgecolor('blue')
-
-    plt.xticks(range(0, 12), labels=['mpe', ' ',
-                'rmse', ' ',
-                'pk_err', ' ',
-                'vl_err', ' ',
-                'egy_err', ' ',
-                'fce_err', ' '])
-    plt.show()
-    fn = '../plot/' + TAG + '/violinplot_cvr.svg'
-    figure.savefig(fn)
-    print(np.mean(bert_mpe_buff), np.mean(bert_rmse_buff), np.mean(bert_pk_err_buff), np.mean(bert_vl_err_buff),
-                                   np.mean(bert_egy_err_buff), np.mean(bert_fce_buff))
-
+        figure = plt.figure(3)
+        top2_reconciliation = np.transpose(top2_reconciliation)
+        violin_parts = plt.violinplot([top2_ite,
+                                       top2_reconciliation[0],
+                                       top2_reconciliation[1],
+                                       top2_reconciliation[2],
+                                       top2_reconciliation[3],
+                                       top2_reconciliation[4],
+                                       top2_reconciliation[5]], showmeans=True, showextrema=False)
+        plt.xticks(range(1, 8), labels=['max',
+                                        str(reconciliation_parameters[0]),
+                                        str(reconciliation_parameters[1]),
+                                        str(reconciliation_parameters[2]),
+                                        str(reconciliation_parameters[3]),
+                                        str(reconciliation_parameters[4]),
+                                        str(reconciliation_parameters[5])])
+        plt.xlabel("threshold")
+        plt.ylabel("PoCP (%)")
+        plt.show()
+        fn = '../plot/' + TAG + '/reconciliation.png'
+        figure.savefig(fn, dpi=300)
+        print("percentage || ite: ", np.mean(top2_ite), " reconciliations: ", np.mean(top2_reconciliation, axis=1))
 
 if __name__ == "__main__":
     # train_bert()
@@ -1119,12 +1012,6 @@ if __name__ == "__main__":
     # train_lstm()
     # train_gin()
     test()
-    # test_cvr()
 
-    # todo
-    # draw results of BERT-PIN(Bert-based Load Inpainting Network) LSTM SAE PIN
-
-    # peak mask
-    # draw results of BERT LSTM SAE PIN
 
 

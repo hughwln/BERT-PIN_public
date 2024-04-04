@@ -11,7 +11,7 @@ import os
 TRAIN_SET_SIZE = 0.7 # slice percentage of training set
 DEV_SET_SIZE = 0.15
 TEST_SET_SIZE = 0.15
-GEN_DATASET = False
+GEN_DATASET = True
 EVAL_MODE = False
 EVAL_TEST_ONLY = False
 TRAIN_BENCHMARK = False
@@ -19,14 +19,17 @@ USE_DELTA_P = False # predict deltaP and reconstruct P manually
 USE_GLOBAL_MSE_LOSS = False # calculate MSE using global loss
 USE_CENTRAL_MASK = False # generate mask at the middle of daily profile
 USE_LOCAL_GAN_LOSS = True # 5 hours most 
-
+MASK_STRATEGY = "Peak" # "Central" "Peak" "Random"
 
 FEEDER = 'NewRiver' # ['BlowingRock','Deerfield','Shadowline','all','Fayetteville', 'Pecan2015']
 # -------Newriver dataset config
 LOAD_SIZE = 'all' # ['large','medium','small','all']
 GROUP = 'group5_' # [1,2,3,4,5]
-USERS = '300users_' #[10,50,100,200,300]
-DATE = '0902_test_2nd_peak'
+
+USERS = '100users_' #[10,50,100,200,300]
+nuser = 2000
+nsample = 200
+DATE = '0321_agg_' + str(nuser) + '_' + str(nsample)
 
 RESO = '15min' #[1h,30min,15min,5min,1min]
 NUM_H = 4
@@ -40,7 +43,7 @@ LOCAL_GAN_STEPS = int(DIM_INPUT/24*5) # 5 hours Local GAN loss window
 N_SAMPLE = 'all' # [1000, 2000, 3000, ... 'all']
 N_START = 0 # random patch start index
 CH_INPUT = 3 # 0-load(with hole)/1-mask/2-temperature
-N_EPOCH = 300 + 1
+N_EPOCH = 100 + 1
 SAVE_PER_EPO = 10
 BATCH_SIZE = 16
 LR = 3e-4
